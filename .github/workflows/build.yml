@@ -38,8 +38,6 @@ jobs:
           tar -xJf geoguard-source.tar.xz -C src
           chmod +x src/scripts/static_audit.py
           test -f src/app/src/main/AndroidManifest.xml
-          # AGP 8 disables BuildConfig generation unless requested. The app only
-          # needs the immutable release version in its diagnostic export.
           sed -i 's/BuildConfig.VERSION_NAME/"1.0.0"/' src/app/src/main/java/jp/gumi/geoguard/MainActivity.java
       - name: Static policy audit
         working-directory: src
@@ -73,6 +71,9 @@ jobs:
           grep -q "targetSdkVersion:'28'" build-artifacts/aapt-badging.txt
           grep -q "sdkVersion:'26'" build-artifacts/aapt-badging.txt
           grep -q 'No errors detected' build-artifacts/zip-integrity.txt
+      - name: Enable emulator hardware acceleration
+        run: |
+          if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; fi
       - name: Android 16 API 36 install and cold-start validation
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -83,7 +84,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
-            set -euo pipefail
+            set -eu
             APK=build-artifacts/GeoGuard-JP-v1.0.0-POCOF7-Compat.apk
             adb install -r "$APK" | tee build-artifacts/api36-install.txt
             grep -q 'Success' build-artifacts/api36-install.txt
@@ -110,7 +111,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
-            set -euo pipefail
+            set -eu
             APK=build-artifacts/GeoGuard-JP-v1.0.0-POCOF7-Compat.apk
             adb install -r "$APK" | tee build-artifacts/api29-install.txt
             grep -q 'Success' build-artifacts/api29-install.txt
