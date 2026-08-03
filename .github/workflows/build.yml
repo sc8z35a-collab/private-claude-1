@@ -4,6 +4,12 @@ on:
     paths:
       - 'chunks/**'
       - '.github/workflows/build.yml'
+  pull_request:
+    paths:
+      - 'chunks/**'
+      - '.github/workflows/build.yml'
+      - 'README.md'
+      - 'CI_VALIDATION.md'
   workflow_dispatch:
 permissions:
   contents: read
@@ -58,6 +64,8 @@ jobs:
           unzip -t build-artifacts/GeoGuard-JP-v1.0.0-target28-v1-test.apk > build-artifacts/zip-integrity.txt
           sha256sum build-artifacts/*.apk > build-artifacts/SHA256SUMS.txt
           cp src/static-audit.txt src/gradle-build.log build-artifacts/
+          cp "$BT/zipalign" build-artifacts/zipalign-linux
+          chmod +x build-artifacts/zipalign-linux
           cp geoguard-source.tar.xz build-artifacts/
           grep -q 'Verified using v1 scheme (JAR signing): true' build-artifacts/apksigner-verify.txt
           grep -q 'Verified using v2 scheme (APK Signature Scheme v2): false' build-artifacts/apksigner-verify.txt
