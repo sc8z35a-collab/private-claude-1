@@ -3,10 +3,12 @@ on:
   push:
     paths:
       - 'chunks/**'
+      - 'patches/**'
       - '.github/workflows/build.yml'
   pull_request:
     paths:
       - 'chunks/**'
+      - 'patches/**'
       - '.github/workflows/build.yml'
       - 'README.md'
       - 'CI_VALIDATION.md'
@@ -36,16 +38,24 @@ jobs:
           cat chunks/part* | base64 --decode > geoguard-source.tar.xz
           mkdir src
           tar -xJf geoguard-source.tar.xz -C src
+          patch -d src -p1 < patches/0001-release-fixes.patch
           chmod +x src/scripts/static_audit.py
           test -f src/app/src/main/AndroidManifest.xml
       - name: Static policy audit
         working-directory: src
-        run: python3 scripts/static_audit.py | tee static-audit.txt
+        run: |
+          mkdir -p ../build-artifacts
+          python3 scripts/static_audit.py | tee static-audit.txt
+          cp static-audit.txt ../build-artifacts/
       - name: Unit tests, lint and release build
         working-directory: src
         run: |
+          set +e
           set -o pipefail
           gradle --no-daemon --stacktrace clean test lintRelease assembleRelease 2>&1 | tee gradle-build.log
+          status=${PIPESTATUS[0]}
+          cp gradle-build.log ../build-artifacts/
+          exit $status
       - name: Create v1-only test APK and audit
         run: |
           set -euo pipefail
@@ -66,7 +76,7 @@ jobs:
           cp src/static-audit.txt src/gradle-build.log build-artifacts/
           cp "$BT/zipalign" build-artifacts/zipalign-linux
           chmod +x build-artifacts/zipalign-linux
-          cp geoguard-source.tar.xz build-artifacts/
+          tar -cJf build-artifacts/GeoGuard-JP-v1.0.0-source.tar.xz -C src .
           grep -q 'Verified using v1 scheme (JAR signing): true' build-artifacts/apksigner-verify.txt
           grep -q 'Verified using v2 scheme (APK Signature Scheme v2): false' build-artifacts/apksigner-verify.txt
           grep -q "targetSdkVersion:'28'" build-artifacts/aapt-badging.txt
