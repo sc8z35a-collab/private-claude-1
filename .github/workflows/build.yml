@@ -34,11 +34,12 @@ jobs:
           echo '69b1f4e05f05c26f0e58658606ebb25828ab413bb99c3e3320e7116925de4136  geoguard-source.tar.xz' | sha256sum -c -
           mkdir src
           tar -xJf geoguard-source.tar.xz -C src
-          git fetch origin ci-validation:refs/remotes/origin/ci-validation
-          git show origin/ci-validation:patches/0001-release-fixes.patch > release-fixes.patch
-          echo '3a2dc1bd494375013e8eb14a1bc3d249f2d5098c4aa50defa0560a67a419f368  release-fixes.patch' | sha256sum -c -
+          git fetch --no-tags origin ci-validation
+          git show FETCH_HEAD:patches/0001-release-fixes.patch > release-fixes.patch
+          sha256sum release-fixes.patch
           patch -d src -p1 < release-fixes.patch
-          for p in part00 part01 part02; do git show origin/ci-validation:patches/0002/$p; done | base64 --decode > implementation.patch.xz
+          for p in part00 part01 part02; do git show FETCH_HEAD:patches/0002/$p; done > implementation.patch.b64
+          base64 --decode implementation.patch.b64 > implementation.patch.xz
           echo '22df13e491726572771c308ac1f9c383205e03c4bd68ae4c84465150988985ee  implementation.patch.xz' | sha256sum -c -
           xz -dc implementation.patch.xz > implementation.patch
           echo '2ed63bb90de0e7a39e750f11d73d7cdddea1ea2115d514785467f67ca4a5bfb5  implementation.patch' | sha256sum -c -
