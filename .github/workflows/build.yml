@@ -18,7 +18,7 @@ permissions:
 jobs:
   build-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -32,21 +32,46 @@ jobs:
       - name: Install Android SDK
         run: |
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0' 'emulator' 'system-images;android-35;google_apis;x86_64'
-      - name: Reconstruct source
+          sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0' 'emulator' 'system-images;android-36;aosp_atd;x86_64'
+      - name: Reconstruct final source
         run: |
+          set -euo pipefail
           cat chunks/part* | base64 --decode > geoguard-source.tar.xz
+          echo '69b1f4e05f05c26f0e58658606ebb25828ab413bb99c3e3320e7116925de4136  geoguard-source.tar.xz' | sha256sum -c -
           mkdir src
           tar -xJf geoguard-source.tar.xz -C src
           patch -d src -p1 < patches/0001-release-fixes.patch
-          chmod +x src/scripts/static_audit.py
+          cat patches/0002/part* | base64 --decode > implementation.patch.xz
+          echo '22df13e491726572771c308ac1f9c383205e03c4bd68ae4c84465150988985ee  implementation.patch.xz' | sha256sum -c -
+          xz -dc implementation.patch.xz > implementation.patch
+          echo '2ed63bb90de0e7a39e750f11d73d7cdddea1ea2115d514785467f67ca4a5bfb5  implementation.patch' | sha256sum -c -
+          patch -d src -p1 < implementation.patch
+          chmod +x src/scripts/*.py
           test -f src/app/src/main/AndroidManifest.xml
-      - name: Static policy audit
+          test -f src/app/src/main/java/jp/gumi/geoguard/PollPolicy.java
+      - name: Static policy and JavaScript audit
+        run: |
+          set -euo pipefail
+          mkdir -p build-artifacts
+          cd src
+          python3 scripts/static_audit.py | tee ../build-artifacts/static-audit.txt
+          python3 - <<'PY' | tee ../build-artifacts/js-syntax.txt
+          from pathlib import Path
+          import re, subprocess
+          html=Path('app/src/main/assets/index.html').read_text(encoding='utf-8')
+          scripts=re.findall(r'<script[^>]*>([\s\S]*?)</script>',html,re.I)
+          assert scripts, 'inline script not found'
+          p=Path('/tmp/geoguard-ui.js'); p.write_text('\n'.join(scripts),encoding='utf-8')
+          subprocess.run(['node','--check',str(p)],check=True)
+          print('PASS JavaScript syntax')
+          PY
+      - name: Live API contract smoke test
         working-directory: src
         run: |
-          mkdir -p ../build-artifacts
-          python3 scripts/static_audit.py | tee static-audit.txt
-          cp static-audit.txt ../build-artifacts/
+          set +e
+          set -o pipefail
+          python3 scripts/api_smoke_test.py 2>&1 | tee ../build-artifacts/api-smoke.txt
+          exit ${PIPESTATUS[0]}
       - name: Unit tests, lint and release build
         working-directory: src
         run: |
@@ -55,6 +80,9 @@ jobs:
           gradle --no-daemon --stacktrace clean test lintRelease assembleRelease 2>&1 | tee gradle-build.log
           status=${PIPESTATUS[0]}
           cp gradle-build.log ../build-artifacts/
+          cp -R app/build/test-results ../build-artifacts/test-results 2>/dev/null || true
+          cp app/build/reports/lint-results-release.html ../build-artifacts/ 2>/dev/null || true
+          cp app/build/reports/lint-results-release.txt ../build-artifacts/ 2>/dev/null || true
           exit $status
       - name: Create v1-only test APK and audit
         run: |
@@ -71,21 +99,26 @@ jobs:
           "$BT/apksigner" verify --verbose --print-certs build-artifacts/GeoGuard-JP-v1.0.0-target28-v1-test.apk > build-artifacts/apksigner-verify.txt
           "$BT/aapt" dump badging build-artifacts/GeoGuard-JP-v1.0.0-target28-v1-test.apk > build-artifacts/aapt-badging.txt
           "$BT/aapt" dump permissions build-artifacts/GeoGuard-JP-v1.0.0-target28-v1-test.apk > build-artifacts/aapt-permissions.txt
+          "$BT/aapt" dump xmltree build-artifacts/GeoGuard-JP-v1.0.0-target28-v1-test.apk AndroidManifest.xml > build-artifacts/manifest-xmltree.txt
           unzip -t build-artifacts/GeoGuard-JP-v1.0.0-target28-v1-test.apk > build-artifacts/zip-integrity.txt
-          sha256sum build-artifacts/*.apk > build-artifacts/SHA256SUMS.txt
-          cp src/static-audit.txt src/gradle-build.log build-artifacts/
+          "$BT/zipalign" -c -p 4 build-artifacts/GeoGuard-JP-v1.0.0-target28-v1-test.apk > build-artifacts/zipalign-check.txt
           cp "$BT/zipalign" build-artifacts/zipalign-linux
-          chmod +x build-artifacts/zipalign-linux
-          tar -cJf build-artifacts/GeoGuard-JP-v1.0.0-source.tar.xz -C src .
+          cp "$BT/aapt" build-artifacts/aapt-linux
+          cp "$BT/lib/apksigner.jar" build-artifacts/apksigner.jar
+          chmod +x build-artifacts/zipalign-linux build-artifacts/aapt-linux
+          tar --exclude='./build' --exclude='./app/build' --exclude='./.gradle' -cJf build-artifacts/GeoGuard-JP-v1.0.0-source.tar.xz -C src .
+          sha256sum build-artifacts/*.apk build-artifacts/GeoGuard-JP-v1.0.0-source.tar.xz > build-artifacts/SHA256SUMS-CI.txt
           grep -q 'Verified using v1 scheme (JAR signing): true' build-artifacts/apksigner-verify.txt
           grep -q 'Verified using v2 scheme (APK Signature Scheme v2): false' build-artifacts/apksigner-verify.txt
+          grep -q 'Verified using v3 scheme (APK Signature Scheme v3): false' build-artifacts/apksigner-verify.txt
           grep -q "targetSdkVersion:'28'" build-artifacts/aapt-badging.txt
           grep -q "sdkVersion:'26'" build-artifacts/aapt-badging.txt
-      - name: Android 15 emulator launch and foreground-service test
+          grep -q "package: name='jp.gumi.geoguard'" build-artifacts/aapt-badging.txt
+      - name: Android 16 launch and foreground-service test
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 35
-          target: google_apis
+          api-level: 36
+          target: aosp_atd
           arch: x86_64
           profile: pixel_6
           disable-animations: true
@@ -93,7 +126,7 @@ jobs:
           script: |
             set -e
             adb logcat -c
-            adb install -r build-artifacts/GeoGuard-JP-v1.0.0-target28-v1-test.apk
+            adb install -r build-artifacts/GeoGuard-JP-v1.0.0-target28-v1-test.apk | tee build-artifacts/emulator-install.txt
             adb shell pm grant jp.gumi.geoguard android.permission.ACCESS_COARSE_LOCATION || true
             adb shell pm grant jp.gumi.geoguard android.permission.ACCESS_FINE_LOCATION || true
             adb shell pm grant jp.gumi.geoguard android.permission.ACCESS_BACKGROUND_LOCATION || true
@@ -104,16 +137,17 @@ jobs:
             adb shell pidof jp.gumi.geoguard | tee build-artifacts/emulator-pid.txt
             test -s build-artifacts/emulator-pid.txt
             adb shell am start-foreground-service -n jp.gumi.geoguard/.MonitorService -a jp.gumi.geoguard.START | tee build-artifacts/emulator-service-start.txt
-            sleep 8
+            sleep 15
             adb shell dumpsys activity services jp.gumi.geoguard > build-artifacts/emulator-services.txt
             grep -q 'MonitorService' build-artifacts/emulator-services.txt
+            adb shell dumpsys notification --noredact > build-artifacts/emulator-notifications.txt || true
             adb logcat -d > build-artifacts/emulator-logcat.txt
             if grep -E 'FATAL EXCEPTION|Process: jp.gumi.geoguard' build-artifacts/emulator-logcat.txt; then exit 1; fi
       - name: Upload validated artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: GeoGuard-JP-build
+          name: GeoGuard-JP-final-build
           path: build-artifacts/
           if-no-files-found: error
           retention-days: 7
