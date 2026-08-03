@@ -1,0 +1,101 @@
+name: Build and validate GeoGuard JP
+on:
+  push:
+    paths:
+      - 'chunks/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0' 'emulator' 'system-images;android-35;google_apis;x86_64'
+      - name: Reconstruct source
+        run: |
+          cat chunks/part* | base64 --decode > geoguard-source.tar.xz
+          mkdir src
+          tar -xJf geoguard-source.tar.xz -C src
+          chmod +x src/scripts/static_audit.py
+          test -f src/app/src/main/AndroidManifest.xml
+      - name: Static policy audit
+        working-directory: src
+        run: python3 scripts/static_audit.py | tee static-audit.txt
+      - name: Unit tests, lint and release build
+        working-directory: src
+        run: |
+          set -o pipefail
+          gradle --no-daemon --stacktrace clean test lintRelease assembleRelease 2>&1 | tee gradle-build.log
+      - name: Create v1-only test APK and audit
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+          mkdir -p build-artifacts
+          cp src/app/build/outputs/apk/release/app-release-unsigned.apk build-artifacts/unsigned.apk
+          keytool -genkeypair -noprompt -keystore test-release.jks -storepass changeit -keypass changeit -alias geoguardtest -keyalg RSA -keysize 3072 -sigalg SHA256withRSA -validity 3650 -dname 'CN=GeoGuard CI Test, OU=CI, O=GUMI, C=JP'
+          cp build-artifacts/unsigned.apk build-artifacts/test-signed-unaligned.apk
+          jarsigner -keystore test-release.jks -storepass changeit -keypass changeit -sigalg SHA256withRSA -digestalg SHA-256 build-artifacts/test-signed-unaligned.apk geoguardtest
+          "$BT/zipalign" -f -p 4 build-artifacts/test-signed-unaligned.apk build-artifacts/GeoGuard-JP-v1.0.0-target28-v1-test.apk
+          "$BT/zipalign" -f -p 4 build-artifacts/unsigned.apk build-artifacts/GeoGuard-JP-v1.0.0-unsigned-aligned.apk
+          jarsigner -verify -verbose -certs build-artifacts/GeoGuard-JP-v1.0.0-target28-v1-test.apk > build-artifacts/jarsigner-verify.txt
+          "$BT/apksigner" verify --verbose --print-certs build-artifacts/GeoGuard-JP-v1.0.0-target28-v1-test.apk > build-artifacts/apksigner-verify.txt
+          "$BT/aapt" dump badging build-artifacts/GeoGuard-JP-v1.0.0-target28-v1-test.apk > build-artifacts/aapt-badging.txt
+          "$BT/aapt" dump permissions build-artifacts/GeoGuard-JP-v1.0.0-target28-v1-test.apk > build-artifacts/aapt-permissions.txt
+          unzip -t build-artifacts/GeoGuard-JP-v1.0.0-target28-v1-test.apk > build-artifacts/zip-integrity.txt
+          sha256sum build-artifacts/*.apk > build-artifacts/SHA256SUMS.txt
+          cp src/static-audit.txt src/gradle-build.log build-artifacts/
+          cp geoguard-source.tar.xz build-artifacts/
+          grep -q 'Verified using v1 scheme (JAR signing): true' build-artifacts/apksigner-verify.txt
+          grep -q 'Verified using v2 scheme (APK Signature Scheme v2): false' build-artifacts/apksigner-verify.txt
+          grep -q "targetSdkVersion:'28'" build-artifacts/aapt-badging.txt
+          grep -q "sdkVersion:'26'" build-artifacts/aapt-badging.txt
+      - name: Android 15 emulator launch and foreground-service test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            set -e
+            adb logcat -c
+            adb install -r build-artifacts/GeoGuard-JP-v1.0.0-target28-v1-test.apk
+            adb shell pm grant jp.gumi.geoguard android.permission.ACCESS_COARSE_LOCATION || true
+            adb shell pm grant jp.gumi.geoguard android.permission.ACCESS_FINE_LOCATION || true
+            adb shell pm grant jp.gumi.geoguard android.permission.ACCESS_BACKGROUND_LOCATION || true
+            adb shell pm grant jp.gumi.geoguard android.permission.POST_NOTIFICATIONS || true
+            adb shell cmd location set-location-enabled true || true
+            adb shell am start -W -n jp.gumi.geoguard/.MainActivity | tee build-artifacts/emulator-start.txt
+            sleep 8
+            adb shell pidof jp.gumi.geoguard | tee build-artifacts/emulator-pid.txt
+            test -s build-artifacts/emulator-pid.txt
+            adb shell am start-foreground-service -n jp.gumi.geoguard/.MonitorService -a jp.gumi.geoguard.START | tee build-artifacts/emulator-service-start.txt
+            sleep 8
+            adb shell dumpsys activity services jp.gumi.geoguard > build-artifacts/emulator-services.txt
+            grep -q 'MonitorService' build-artifacts/emulator-services.txt
+            adb logcat -d > build-artifacts/emulator-logcat.txt
+            if grep -E 'FATAL EXCEPTION|Process: jp.gumi.geoguard' build-artifacts/emulator-logcat.txt; then exit 1; fi
+      - name: Upload validated artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GeoGuard-JP-build
+          path: build-artifacts/
+          if-no-files-found: error
+          retention-days: 7
